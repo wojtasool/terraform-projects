@@ -1,0 +1,230 @@
+---
+- hosts: all
+  become: yes
+  user: cloud
+  become: true
+  vars:
+    sysctl:
+      - "net.ipv4.ip_forward"
+      - "net.ipv6.conf.default.disable_ipv6"
+      - "net.ipv6.conf.all.disable_ipv6"
+      - "net.ipv4.conf.all.rp_filter"
+      - "net.ipv6.conf.all.disable_ipv6"
+      - "net.ipv6.conf.default.disable_ipv6"
+      - "net.bridge.bridge-nf-call-iptables"
+    control_plane_ports:
+      - "6443/tcp"
+      - "10250/tcp"
+      - "4789/udp"
+    etcd_ports:
+      - "2376/tcp"
+      - "2379/tcp"
+      - "2380/tcp"
+      - "8472/udp"
+      - "10250/tcp"
+      - "4789/udp"
+    worker_ports:
+      - "10250/tcp"
+      - "8472/udp"
+      - "30000-32767/tcp"
+      - "443/tcp"
+      - "80/tcp"
+      - "4789/udp"
+
+  tasks:
+
+  - name: Create a directory if it does not exist
+    ansible.builtin.file:
+      path: "{{ item }}"
+      state: directory
+    with_items:
+      - /opt/docker
+    tags:
+      - provision
+
+  - name: Format disk
+    community.general.filesystem:
+      fstype: ext4
+      dev: /dev/vdb
+    tags:
+      - provision
+
+  - name: Mount up docker directory
+    ansible.posix.mount:
+      path: /opt/docker
+      src: /dev/vdb
+      fstype: ext4
+      state: mounted
+    tags:
+      - provision
+
+  - name: Get roles
+    command: cat /tmp/roles
+    register: roles
+    tags: 
+    - provision
+
+  - debug:
+      msg: "{{roles.stdout }}"
+    tags:
+      - provision
+
+  - community.general.modprobe:
+      name: "{{ item }}"
+      state: present
+    with_items:
+      - br_netfilter
+      - xt_nat
+      - xt_REDIRECT
+      - ipt_MASQUERADE
+      - nf_tables
+      - bridge
+      - nf_tables
+      - nf_nat
+      - xt_conntrack
+      - xt_comment
+      - nft_reject
+      - iptable_nat
+      - xt_addrtype
+      - iptable_filter
+    tags:
+      - provision
+
+  - ansible.posix.sysctl:
+      name: "{{ item }}"
+      value: '1'
+      sysctl_set: yes
+      reload: yes
+    with_items:
+      - "{{ sysctl }}"
+    tags:
+      - provision
+
+  - name: Prevent Network Manager to control calico interfaces
+    copy:
+      dest: /etc/NetworkManager/conf.d/calico.conf
+      content: |
+        [keyfile]
+        unmanaged-devices=interface-name:cali*;interface-name:tunl*;interface-name:vxlan.calico;interface-name:flannel.*
+    tags:
+      - provision
+
+  - name: Disable SWAP since kubernetes can't work with swap enabled (1/2)
+    shell: |
+      swapoff -a
+    tags:
+      - provision
+
+  - name: Disable SWAP in fstab since kubernetes can't work with swap enabled (2/2)
+    replace:
+      path: /etc/fstab
+      regexp: '^(^UUID.*swap.*)$'
+      replace: '# \1'
+    tags:
+      - provision
+
+  - name: Enable ETCD ports
+    ansible.posix.firewalld:
+      port: "{{ item }}"
+      permanent: yes
+      state: enabled
+      immediate: yes
+    with_items:
+      - "{{ etcd_ports }}"
+    tags:
+      - provision
+    when: '"etcd" in roles.stdout'
+
+
+
+  - name: Enable CONTROLPLANE ports
+    ansible.posix.firewalld:
+      port: "{{ item }}"
+      permanent: yes
+      state: enabled
+      immediate: yes
+    with_items:
+      - "{{ control_plane_ports }}"
+    tags:
+      - provision
+    when: '"controlplane" in roles.stdout'
+
+
+  - name: Enable WORKER ports
+    ansible.posix.firewalld:
+      port: "{{ item }}"
+      permanent: yes
+      state: enabled
+      immediate: yes
+    with_items:
+      - "{{ worker_ports }}"
+    tags:
+      - provision
+    when: '"worker" in roles.stdout'
+
+
+  - ansible.posix.firewalld:
+      masquerade: yes
+      state: enabled
+      permanent: yes
+      zone: public
+      immediate: yes
+    tags:
+      - provision
+
+  - name: Enable SELinux
+    ansible.posix.selinux:
+      state: enforced
+      policy: targeted
+    tags:
+      - provision
+    when: selinux == "enforced"
+
+  - name: Permissive SELinux
+    ansible.posix.selinux:
+      state: permissive
+      policy: targeted
+    tags:
+      - provision
+    when: selinux == "disabled"
+
+  - name: Add the user 'cloud'
+    ansible.builtin.user:
+      name: cloud
+      group: docker
+    tags:
+      - provision
+
+  - name: Create a directory if it does not exist
+    ansible.builtin.file:
+      path: "{{ item }}"
+      state: directory
+    with_items:
+      - /etc/docker
+    tags:
+      - provision
+
+  - name: Creating a file with content
+    copy:
+      dest: "/etc/docker/daemon.json"
+      content: |
+        {
+            "data-root": "/opt/docker",
+            "log-driver": "json-file",
+            "live-restore": true,
+            "log-opts": {
+                "max-size": "1024m",
+                "max-file": "1"
+            },
+            "storage-driver": "overlay2"
+        }
+    tags:
+      - provision
+
+  - name: Enable and run docker
+    ansible.builtin.service:
+      name: docker
+      state: started
+      enabled: yes
+    tags:
+      - provision
