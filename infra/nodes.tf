@@ -141,15 +141,13 @@ resource "libvirt_domain" "node" {
   for_each = { for domain in local.domains_disks : domain.name => domain }
   name     = "${each.key}"
   memory   = (try("${each.value.memory}", 0) == 0) ? var.default_memory : "${each.value.memory}"
-  #memory  = (try(local.domains[each.key].memory, 0) == 0) ? var.default_memory : "${local.domains[each.key].memory}"
-  vcpu    = (try("${each.value.cpu}", 0) == 0) ? var.default_cpu : "${each.value.cpu}"
-  running = false
+  vcpu     = (try("${each.value.cpu}", 0) == 0) ? var.default_cpu : "${each.value.cpu}"
+  running  = false
 
   disk {
     volume_id = "${each.value.OSDisk}" ##libvirt_volume.node_root_disk[each.key].id
   }
   dynamic disk {
-    #for_each = [for k, v in each.value.additional_disks[0] : k]
     for_each = [for disk in each.value.additional_disks[0] : disk]
     content {
       volume_id = "${disk.value.name}"
